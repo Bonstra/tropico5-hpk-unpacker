@@ -1,0 +1,79 @@
+Unless specified otherwise, all multibyte integers are little-endian.
+
+File header:
+Offset	Size	Description
+0x00	4	"BPUL" magic
+0x04	4	Size of this header (0x24)
+0x08	4	? (0x1)
+0x0c	4	? (0xffffffff)
+0x10	4	? (0x0)
+0x14	4	? (0x0)
+0x18	4	? (0x1)
+0x1c	4	Offset to the file table
+0x20	4	? (0x4f)
+
+File table:
+Offset	Size	Description
+0x00	4	Offset to name table for the root directory (index 1)
+0x04	4	Size in bytes of all name entries in the root directory
+0x08	4	Offset to file data/directory contents (index 2)
+0x0c	4	File/directory size in bytes
+... Next file entry
+
+Directory entry (in a directory file):
+Offset	Size	Description
+0x00	4	Index in file table (1 based)
+0x04	4	Entry type. 0=file 1=directory
+0x08	2	Name length
+0x0a	XX	Entry name
+
+
+
+= Local/French.hpk =
+File header:
+Header size: 0x24
+File table offset: 0x114a66
+Offset 0x20: 0x18
+
+Name table: (@0x114a3b)
+- 03 File "Game.csv"
+- 02 Directory "CurrentLanguage"
+
+File table: (@0x114a66)
+- Entry 01: 0x114a4d (points to "CurrentLanguage" dir) 0x19 (dir entry size)
+  (root directory only contains the "CurrentLanguage" directory)
+- Entry 02: 0x114a3b ("Game.csv" file) 0x12 (file entry size) (directory only
+  contains one file)
+- Entry 03: 0x24 (file data offset) 0x114a17 (file size)
+
+= Packs/Music.hpk =
+File header:
+Header size: 0x24
+Offset 0x20: 0x98
+
+Name table: (@0x2ad4913)
+- 02 File "101258_BW2.opus"
+- 03 File "104087-Pan Con Queso.opus"
+- 04 File "203544_Suite Cuna Tropical.opus"
+- 05 File "229954_Red Rumba.opus"
+- 06 File "289984_Chica Chica.opus"
+- 07 File "290738_Canaveral.opus"
+- 08 File "290746_La Bombonera.opus"
+- 09 File "297445_Alegremerengue.opus"
+- 0a File "297446_Merengue picaro.opus"
+- 0b File "297452_Como canta al mereng.opus"
+- 0c File "564957_Chica Bonita V2.opus"
+- 0d File "586705_Samba Cubano.opus"
+- 0e File "655202_Cafe Cubano.opus"
+- 0f File "706051_Congratulations Its.opus"
+- 10 File "709947_Demented Piano Y Sax.opus"
+- 11 File "756729_DAMELO IN SPANGLISH.opus"
+- 12 File "Andalucia.opus"
+- 13 File "Motika.opus"
+
+File table: (@0x2ad4b7e)
+- Root directory: 0x2ad4913 (points to file 02 entry in name table) 0x26b
+  (size of the whole name table i.e. root directory contains all the files)
+- File 02: 0x24 0x21721d
+- File 03: 0x217241 0x299e02
+
