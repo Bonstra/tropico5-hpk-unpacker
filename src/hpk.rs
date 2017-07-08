@@ -55,7 +55,9 @@ pub struct Archive {
 
 pub struct FileData {
     file: fs::File,
-    size: u64
+    size: u64,
+    base_offset: u64,
+    cur_offset: u64,
 }
 
 impl File {
@@ -91,9 +93,85 @@ impl Directory {
 }
 
 impl FileData {
+    fn new(mut file: fs::File, fentry: &FileTableEntry) -> Result<FileData>
+    {
+        file.seek(SeekFrom::Start(fentry.offset as u64))?;
+        Ok(FileData {
+            file: file,
+            size: fentry.size as u64,
+            base_offset: fentry.offset as u64,
+            cur_offset: 0,
+        })
+    }
+
     pub fn file(self) -> Take<fs::File>
     {
         self.file.take(self.size)
+    }
+}
+
+impl Read for FileData {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>
+    {
+        let mut readable: usize =
+            self.size as usize - self.cur_offset as usize;
+        if readable > buf.len() {
+            readable = buf.len();
+        };
+        let readlen = self.file.read(&mut buf[..readable])?;
+        self.cur_offset += readlen as u64;
+        Ok(readlen)
+    }
+}
+
+impl Seek for FileData {
+    fn seek(&mut self, style: SeekFrom) -> io::Result<u64>
+    {
+        use std::io::{Error, ErrorKind};
+        match style {
+            SeekFrom::Start(o) => {
+                if o > self.size {
+                    Err(io::Error::new(ErrorKind::InvalidData,
+                                       "Attempted to seek beyond EOF"))
+                } else {
+                    let new_off = self.file.seek(SeekFrom::Start(self.base_offset + o))?;
+                    self.cur_offset = new_off - self.base_offset;
+                    Ok(self.cur_offset)
+                }
+            },
+            SeekFrom::End(o) => {
+                let wanted_off = (self.size as i64) + o;
+                if o > 0 {
+                    Err(Error::new(ErrorKind::InvalidData,
+                                   "Attempted to seek beyond EOF"))
+                } else if wanted_off < 0 {
+                    Err(Error::new(ErrorKind::InvalidData,
+                                   "Seek resulted in negative offset"))
+                } else {
+                    let new_off = self.file.seek(
+                        SeekFrom::Start(
+                            self.base_offset + wanted_off as u64))?;
+                    self.cur_offset = new_off - self.base_offset;
+                    Ok(self.cur_offset)
+                }
+            },
+            SeekFrom::Current(o) => {
+                let cur = self.cur_offset as i64;
+                let wanted_off = cur + o;
+                if wanted_off < 0 {
+                    Err(Error::new(ErrorKind::InvalidData,
+                                   "Seek resulted in negative offset"))
+                } else if wanted_off > (self.size as i64) {
+                    Err(Error::new(ErrorKind::InvalidData,
+                                   "Attempted to seek beyond EOF"))
+                } else {
+                    let new_off = self.file.seek(
+                        SeekFrom::Start(self.base_offset + wanted_off as u64))?;
+                    self.cur_offset = new_off - self.base_offset;
+                    Ok(self.cur_offset)
+                }
+            }
+        }
     }
 }
 
@@ -278,11 +356,7 @@ impl Archive {
     pub fn file_data(&self, file: &File) -> Result<FileData>
     {
         let mut f = self.file.basefile.try_clone()?;
-        f.seek(SeekFrom::Start(file.file_entry.offset as u64))?;
-        return Ok(FileData {
-            file: f,
-            size: file.file_entry.size as u64
-        });
+        FileData::new(f, &file.file_entry)
     }
 
     pub fn root_directory(&self) -> &Directory

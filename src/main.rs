@@ -145,7 +145,7 @@ fn create_dirs(archive: &Archive, directory: &Directory, outpath: &str) -> Resul
 /* Extract a single file to a specified output directory */
 fn extract_file(archive: &Archive, file: &hpk::File, outpath: &str) -> Result<()>
 {
-    let mut data = archive.file_data(file)?.file();
+    let mut data = archive.file_data(file)?;
     let mut out;
     let mut remain = file.size() as usize;
     {
