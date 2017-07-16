@@ -69,7 +69,7 @@ fn build_path(dir: &Directory, dirstack: &Vec<DirCtx>) -> String
     path
 }
 
-fn foreach_dir_in_dir<F>(archive: &Archive, dir: &Directory, closure: F) -> Result<()>
+fn foreach_dir_in_dir<F>(_archive: &Archive, dir: &Directory, closure: F) -> Result<()>
     where F: Fn(&Directory, &str, u16) -> Result<()>
 {
     // Initial state
@@ -98,7 +98,7 @@ fn foreach_dir_in_dir<F>(archive: &Archive, dir: &Directory, closure: F) -> Resu
                 };
                 closure(ctx.dir,
                         &build_path(ctx.dir, &dirstack),
-                        dirstack.len() as u16);
+                        dirstack.len() as u16)?;
             }
         };
     };
@@ -113,17 +113,17 @@ fn foreach_file_in_dir<F>(archive: &Archive, dir: &Directory, closure: F) -> Res
             closure(f, path, level)?;
         }
         Ok(())
-    });
-    Ok(())
+    })
 }
 
-fn list_archive(archive: &Archive)
+fn list_archive(archive: &Archive) -> Result<()>
 {
-    foreach_file_in_dir(archive, archive.root_directory(), |file, path, level| {
+    foreach_file_in_dir(archive, archive.root_directory(), |file, path, _level| {
         let mut display_path = String::new();
         println!("{}{}", path, file.name());
+        unimplemented!();
         Ok(())
-    });
+    })
 }
 
 /* Create all the output directory hiererchy under a specified path. */
@@ -132,7 +132,7 @@ fn create_dirs(archive: &Archive, directory: &Directory, outpath: &str) -> Resul
     use std::fs::DirBuilder;
     let mut builder = DirBuilder::new();
     builder.recursive(true);
-    foreach_dir_in_dir(archive, directory, |dir, path, level| {
+    foreach_dir_in_dir(archive, directory, |_dir, path, _level| {
         let mut dirpath = String::from(outpath);
         dirpath.push(std::path::MAIN_SEPARATOR);
         dirpath.push_str(path);
@@ -147,7 +147,7 @@ fn extract_file(archive: &Archive, file: &hpk::File, outpath: &str) -> Result<()
 {
     let mut data = archive.file_data(file)?;
     let mut out;
-    let mut remain = file.size() as usize;
+    let mut remain = data.size() as usize;
     {
         use std::fs::File;
         let mut filepath = String::new();
@@ -178,7 +178,7 @@ fn extract_archive(archive: &Archive, outpath: &str) -> Result<()>
 {
     let rootdir = archive.root_directory();
     create_dirs(archive, rootdir, outpath)?;
-    foreach_file_in_dir(archive, archive.root_directory(), |file, path, level| {
+    foreach_file_in_dir(archive, archive.root_directory(), |file, path, _level| {
         let mut filepath = String::new();
         filepath.push_str(outpath);
         filepath.push(std::path::MAIN_SEPARATOR);
@@ -186,8 +186,7 @@ fn extract_archive(archive: &Archive, outpath: &str) -> Result<()>
         println!("{}{}", filepath, file.name());
         extract_file(archive, file, &filepath)?;
         Ok(())
-    });
-    Ok(())
+    })
 }
 
 fn run() -> Result<()> {
@@ -206,7 +205,7 @@ fn run() -> Result<()> {
     println!("Num directories: {}", rootdir.directories().len());
 
     //list_archive(&archive);
-    extract_archive(&archive, &matches.free[1]);
+    extract_archive(&archive, &matches.free[1])?;
 
     /*
     let file1 = &rootdir.files()[0];

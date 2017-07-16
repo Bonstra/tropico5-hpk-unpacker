@@ -8,4 +8,5 @@ description = "Unpacker for Tropico 5 HPK archives."
 byteorder = "1.0.0"
 error-chain = "0.10.0"
 getopts = "0.2"
+libflate = "0.1.9"
 

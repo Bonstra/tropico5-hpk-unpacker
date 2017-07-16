@@ -1,17 +1,22 @@
 extern crate byteorder;
+extern crate libflate;
 
 use ::errors::*;
 use std::io;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::io::SeekFrom;
-use std::io::Bytes;
-use std::io::Take;
 use std::fs;
+use std::collections::HashMap;
 use self::byteorder::{ByteOrder, LittleEndian};
 
 const FILE_ENTRY_SIZE: usize = 8;
 const NAME_ENTRY_MIN_SIZE: usize = 10;
+
+const ZLIB_BLOCKTBL_OFFSET: u64 = 0x0c;
+const ZLIB_MAX_CACHE_ENTRIES: usize = 2;
+const ZLIB_MAX_BLOCKSIZE: u64 = 0x1000000;
+
 
 pub enum EntryType {
     File,
@@ -53,11 +58,28 @@ pub struct Archive {
     rootdir: Directory,
 }
 
-pub struct FileData {
+enum FileDataEncoding {
+    Plain(FileDataPlain),
+    Zlib(FileDataZlib)
+}
+
+struct FileDataPlain {
     file: fs::File,
     size: u64,
     base_offset: u64,
     cur_offset: u64,
+}
+
+struct FileDataZlib {
+    plain: FileDataPlain,
+    size: u64,
+    cur_offset: u64,
+    blocksize: u64,
+    cache: HashMap<u32, Vec<u8>>
+}
+
+pub struct FileData {
+    fdata: FileDataEncoding,
 }
 
 impl File {
@@ -92,11 +114,10 @@ impl Directory {
     }
 }
 
-impl FileData {
-    fn new(mut file: fs::File, fentry: &FileTableEntry) -> Result<FileData>
+impl FileDataPlain {
+    fn from(mut file: fs::File, fentry: &FileTableEntry) -> Result<FileDataPlain>
     {
-        file.seek(SeekFrom::Start(fentry.offset as u64))?;
-        Ok(FileData {
+        Ok(FileDataPlain {
             file: file,
             size: fentry.size as u64,
             base_offset: fentry.offset as u64,
@@ -104,13 +125,13 @@ impl FileData {
         })
     }
 
-    pub fn file(self) -> Take<fs::File>
+    fn size(&self) -> u64
     {
-        self.file.take(self.size)
+        return self.size;
     }
 }
 
-impl Read for FileData {
+impl Read for FileDataPlain {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>
     {
         let mut readable: usize =
@@ -124,7 +145,7 @@ impl Read for FileData {
     }
 }
 
-impl Seek for FileData {
+impl Seek for FileDataPlain {
     fn seek(&mut self, style: SeekFrom) -> io::Result<u64>
     {
         use std::io::{Error, ErrorKind};
@@ -175,6 +196,283 @@ impl Seek for FileData {
     }
 }
 
+impl FileDataZlib {
+    fn parse_header(header: &[u8]) -> Result<(u64, u64)>
+    {
+        let mut magic_iter = (&header[0..4]).into_iter();
+        if !"ZLIB".bytes().all(|i1| {
+            match magic_iter.next() {
+                Some(i2) => &i1 == i2,
+                None => false
+            }
+        }) {
+            bail!("Invalid magic");
+        }
+        let size = LittleEndian::read_u32(&header[4..8]) as u64;
+        let blocksize = LittleEndian::read_u32(&header[8..0xc]) as u64;
+        if blocksize == 0 {
+            bail!("Block size is 0");
+        }
+        if blocksize > ZLIB_MAX_BLOCKSIZE {
+            bail!("Block size is exceeding the maximum allowed: {} > {}",
+                  blocksize, ZLIB_MAX_BLOCKSIZE);
+        }
+        Ok((size, blocksize))
+    }
+
+    fn from(mut file: fs::File, fentry: &FileTableEntry) -> Result<FileDataZlib>
+    {
+        let mut plain = FileDataPlain::from(file, fentry)?;
+        let expanded_size: u64;
+        let blocksize: u64;
+        let (expanded_size, blocksize) = {
+            let mut header = [0u8; 0xc];
+            plain.read_exact(&mut header)?;
+            Self::parse_header(&header)?
+        };
+
+        Ok(FileDataZlib {
+            plain: plain,
+            size: expanded_size,
+            blocksize: blocksize,
+            cur_offset: 0u64,
+            cache: HashMap::new(),
+        })
+    }
+
+    fn size(&self) -> u64
+    {
+        return self.size;
+    }
+
+    /** Evict one entry from the cache, provided that it is not idx.
+     * Panics if idx is the only entry in the cache or if no entry can be
+     * evicted. */
+    fn evict_another_entry(&mut self, idx: u32)
+    {
+        if self.cache.len() == 0 {
+            panic!("Cannot evict an entry from an empty cache!");
+        }
+        if self.cache.len() == 1 && self.cache.contains_key(&idx) {
+            panic!("Cannot evict the only entry we try to keep in the cache!");
+        }
+        let min = *self.cache.keys().min().unwrap();
+        if min == idx {
+            let max = *self.cache.keys().max().unwrap();
+            self.cache.remove(&max);
+        } else {
+            self.cache.remove(&min);
+        }
+    }
+
+    fn read_block_offset_and_size(&mut self, idx: u32) -> io::Result<(u64, u64, u64)>
+    {
+        let partial_block_size = (self.size % self.blocksize) as u64;
+        let num_blocks = if partial_block_size > 0 {
+            ((self.size / self.blocksize) as u32) + 1
+        } else {
+            (self.size / self.blocksize) as u32
+        };
+        if idx >= num_blocks {
+            panic!("idx {} is higher than the total number of blocks ({})",
+                   idx, num_blocks);
+        }
+        if num_blocks == 0 {
+            return Ok((ZLIB_BLOCKTBL_OFFSET, 0u64, 0u64));
+        }
+
+        let last_block = num_blocks - 1;
+        let start_off = {
+            let mut buf = [0u8; 4];
+            let tbl_entry_off = ZLIB_BLOCKTBL_OFFSET + (idx as u64 * 4);
+            self.plain.seek(SeekFrom::Start(tbl_entry_off))?;
+            self.plain.read_exact(&mut buf)?;
+            LittleEndian::read_u32(&buf[..]) as u64
+        };
+        let (end_off, unpacked_size) = if idx == last_block {
+            (self.plain.size(), partial_block_size)
+        } else {
+            let mut buf = [0u8; 4];
+            self.plain.read_exact(&mut buf)?;
+            (LittleEndian::read_u32(&buf[..]) as u64, self.blocksize)
+        };
+        let size = end_off - start_off;
+        if size > self.blocksize {
+            use std::io::ErrorKind;
+            let err = io::Error::new(ErrorKind::InvalidData,
+                                     format!("Block at index {} is larger than block size ({} > {})",
+                                     idx, size, self.blocksize));
+            return Err(err);
+        }
+        Ok((start_off, size, unpacked_size))
+    }
+
+    /** Read and decompress a block. */
+    fn read_block(&mut self, idx: u32) -> io::Result<Vec<u8>>
+    {
+        let (pack_start, pack_size, unpack_size) = self.read_block_offset_and_size(idx)?;
+        let mut plain_block = vec![0u8; pack_size as usize];
+        self.plain.seek(SeekFrom::Start(pack_start))?;
+        self.plain.read_exact(&mut plain_block)?;
+        if pack_size == unpack_size {
+            return Ok(plain_block);
+        };
+        /* Pack size is lower than block size => pack is compressed */
+        use self::libflate::zlib::Decoder;
+        let mut decoder = Decoder::new(&plain_block[..])?;
+        let mut inflated_block = vec![0u8; unpack_size as usize];
+        decoder.read_exact(&mut inflated_block)?;
+        Ok(inflated_block)
+    }
+
+    /** Get a block from the cache. If none exist, read the requested block and
+     * add it into the cache. */
+    fn get_block(&mut self, idx: u32) -> io::Result<&Vec<u8>>
+    {
+        if self.cache.contains_key(&idx) {
+            return Ok(self.cache.get(&idx).unwrap());
+        }
+
+        let block = self.read_block(idx)?;
+        while self.cache.len() >= ZLIB_MAX_CACHE_ENTRIES {
+            self.evict_another_entry(idx);
+        };
+        self.cache.insert(idx, block);
+        Ok(self.cache.get(&idx).unwrap())
+    }
+}
+
+impl Read for FileDataZlib {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>
+    {
+        let mut out_pos = 0u64;
+        let mut size_left = buf.len() as u64;
+        if size_left > (self.size - self.cur_offset) {
+            self.size - self.cur_offset;
+        };
+        while size_left > 0 && self.cur_offset < self.size {
+            let idx = (self.cur_offset / self.blocksize) as u32;
+            let block_offset = self.cur_offset % self.blocksize;
+            let to_copy;
+            {
+                let blockdata = self.get_block(idx)?;
+                to_copy = if size_left < (blockdata.len() as u64 - block_offset) {
+                    size_left
+                } else {
+                    blockdata.len() as u64 - block_offset
+                };
+                &mut buf[out_pos as usize..(out_pos + to_copy) as usize].copy_from_slice(
+                    &blockdata[block_offset as usize..(block_offset + to_copy) as usize]);
+            }
+            out_pos += to_copy;
+            size_left -= to_copy;
+            self.cur_offset += to_copy;
+        }
+        Ok(out_pos as usize)
+    }
+}
+
+impl Seek for FileDataZlib {
+    fn seek(&mut self, style: SeekFrom) -> io::Result<u64>
+    {
+        use std::io::{Error, ErrorKind};
+        match style {
+            SeekFrom::Start(o) => {
+                if o > self.size {
+                    Err(io::Error::new(ErrorKind::InvalidData,
+                                       "Attempted to seek beyond EOF"))
+                } else {
+                    self.cur_offset = o;
+                    Ok(self.cur_offset)
+                }
+            },
+            SeekFrom::End(o) => {
+                let wanted_off = (self.size as i64) + o;
+                if o > 0 {
+                    Err(Error::new(ErrorKind::InvalidData,
+                                   "Attempted to seek beyond EOF"))
+                } else if wanted_off < 0 {
+                    Err(Error::new(ErrorKind::InvalidData,
+                                   "Seek resulted in negative offset"))
+                } else {
+                    self.cur_offset = wanted_off as u64;
+                    Ok(self.cur_offset)
+                }
+            },
+            SeekFrom::Current(o) => {
+                let cur = self.cur_offset as i64;
+                let wanted_off = cur + o;
+                if wanted_off < 0 {
+                    Err(Error::new(ErrorKind::InvalidData,
+                                   "Seek resulted in negative offset"))
+                } else if wanted_off > (self.size as i64) {
+                    Err(Error::new(ErrorKind::InvalidData,
+                                   "Attempted to seek beyond EOF"))
+                } else {
+                    self.cur_offset = wanted_off as u64;
+                    Ok(self.cur_offset)
+                }
+            }
+        }
+    }
+}
+
+impl FileData {
+    fn new(mut file: fs::File, fentry: &FileTableEntry) -> Result<FileData>
+    {
+        file.seek(SeekFrom::Start(fentry.offset as u64))?;
+        let is_zlib = {
+            let mut magic = [0u8; 4];
+            file.read_exact(&mut magic)?;
+            file.seek(SeekFrom::Start(fentry.offset as u64))?;
+            let mut magic_iter = magic.into_iter();
+            "ZLIB".bytes().all(|i1| {
+                match magic_iter.next() {
+                    Some(i2) => &i1 == i2,
+                    None => false
+                }
+            })
+        };
+        if is_zlib {
+            Ok(FileData {
+                fdata: FileDataEncoding::Zlib(FileDataZlib::from(file, fentry)?),
+            })
+        } else {
+            Ok(FileData {
+                fdata: FileDataEncoding::Plain(FileDataPlain::from(file, fentry)?),
+            })
+        }
+    }
+
+    pub fn size(&self) -> u64
+    {
+        match &self.fdata {
+            &FileDataEncoding::Plain(ref plain) => plain.size(),
+            &FileDataEncoding::Zlib(ref zlib) => zlib.size()
+        }
+    }
+}
+
+impl Read for FileData {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>
+    {
+        match &mut self.fdata {
+            &mut FileDataEncoding::Plain(ref mut plain) => plain.read(buf),
+            &mut FileDataEncoding::Zlib(ref mut zlib) => zlib.read(buf)
+        }
+    }
+}
+
+impl Seek for FileData {
+    fn seek(&mut self, style: SeekFrom) -> io::Result<u64>
+    {
+        match &mut self.fdata {
+            &mut FileDataEncoding::Plain(ref mut plain) => plain.seek(style),
+            &mut FileDataEncoding::Zlib(ref mut zlib) => zlib.seek(style)
+        }
+    }
+}
+
 impl ArchiveFile {
 
     fn read_header<T: Read+Seek>(reader: &mut T) -> Result<u32>
@@ -184,7 +482,7 @@ impl ArchiveFile {
         let filetbl_offset;
         reader.seek(SeekFrom::Start(0))?;
         {
-            let mut buf = [0; 0x20];
+            let mut buf = [0u8; 0x20];
             reader.read_exact(&mut buf)?;
             magic = LittleEndian::read_u32(&buf[0..4]);
             header_size = LittleEndian::read_u32(&buf[4..8]);
@@ -355,7 +653,7 @@ impl Archive {
 
     pub fn file_data(&self, file: &File) -> Result<FileData>
     {
-        let mut f = self.file.basefile.try_clone()?;
+        let f = self.file.basefile.try_clone()?;
         FileData::new(f, &file.file_entry)
     }
 

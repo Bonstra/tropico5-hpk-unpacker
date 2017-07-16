@@ -1,0 +1,17 @@
+Compressed file format:
+
+= Header =
+Offset	Size	Description
+0x00	0x4	"ZLIB" magic
+0x04	0x4	Uncompressed file size
+0x08	0x4	Block size
+0x0c	0x4	Block 0 offset (also size of file header)
+0x10	0x4	Block 1 offset
+0x14	0x4	Block 2 offset
+...
+0xXX	0x4	Last block offset
+
+If (block[i+1].offset - block[i].offset) < block_size => block data is compressed.
+If (block[i+1].offset - block[i].offset) == block_size => block data is uncompressed.
+The last block is compressed if:
+  (zlib_file_size - last_block_offset) != (uncompressed_size % block_size)
