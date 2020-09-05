@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Hugo Grostabussiat <bonstra@bonstra.fr.eu.org>"]
 description = "Unpacker for Tropico 5 HPK archives."
 license = "LGPL-3.0-or-later"
+repository = "https://github.com/Bonstra/tropico5-hpk-unpacker/"
 
 [dependencies]
 byteorder = "1.0.0"
