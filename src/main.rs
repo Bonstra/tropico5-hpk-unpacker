@@ -208,29 +208,5 @@ fn run() -> Result<()> {
     //list_archive(&archive);
     extract_archive(&archive, &matches.free[1])?;
 
-    /*
-    let file1 = &rootdir.files()[0];
-    let mut data = archive.file_data(file1)?.file();
-
-    {
-        let mut out = fs::File::create(file1.name())?;
-        let mut remain = file1.size() as usize;
-        while remain > 0 {
-            use std::io::Write;
-            use std::io::Read;
-            // XXX: There must be a faster way
-            let mut buf = vec!(0; 0x100000);
-            let buflen = buf.len();
-            let size = if remain > buflen {
-                buflen
-            } else {
-                remain
-            };
-            data.read_exact(&mut buf[0..size])?;
-            out.write(&buf[0..size])?;
-            remain -= size;
-        }
-    }
-    */
     Ok(())
 }
